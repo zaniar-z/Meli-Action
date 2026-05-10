@@ -436,7 +436,8 @@ jobs:
       # ──────────────────────────────────────
       # قدم هفتم: ارسال فایل‌ها به مخزن
       # ──────────────────────────────────────
-      - name: 📤 ارسال فایل‌های جدید به مخزن
+
+            - name: 📤 ارسال فایل‌های جدید به مخزن (دسته‌بندی بر اساس حجم)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -446,28 +447,73 @@ jobs:
             exit 1
           fi
 
-          find downloads -type f ! -name "*.partial" ! -name ".download_results.json" -exec git add {} \;
-          git add Links.md   # اضافه کردن فایل لینک‌ها
+          # جمع‌آوری فایل‌های جدید (بدون فایل‌های موقت)
+          mapfile -t NEW_FILES < <(find downloads -type f ! -name "*.partial" ! -name ".download_results.json")
+          if [ -f Links.md ] && ! git diff --quiet Links.md; then
+            NEW_FILES+=("Links.md")
+          fi
 
-          if git diff --cached --quiet; then
+          TOTAL_FILES=${#NEW_FILES[@]}
+          if [ $TOTAL_FILES -eq 0 ]; then
             echo "✅ فایل جدیدی برای commit وجود ندارد."
             exit 0
           fi
+          echo "🔢 تعداد فایل‌های جدید: $TOTAL_FILES"
 
-          git commit -m "Add downloaded files & update Links.md [skip ci]"
+          MAX_BATCH_SIZE_MB=500   # حداکثر حجم هر دسته به مگابایت
+          batch=()
+          batch_size_mb=0
 
-          for attempt in 1 2 3; do
-            if git push origin ${{ github.ref_name }} 2>&1; then
-              echo "   ✅ بارگذاری موفق"
-              break
-            else
-              if [ $attempt -lt 3 ]; then
-                echo "   ⚠️ push ناموفق، تلاش دوباره $attempt/3..."
-                sleep 5
-              else
-                echo "   ❌ push پس از ۳ تلاش ناموفق ماند"
-                exit 1
-              fi
+          for file in "${NEW_FILES[@]}"; do
+            file_size_mb=$(( $(stat -c%s "$file") / 1048576 ))
+            # اگر اضافه کردن این فایل حجم دسته را از حد بگذراند، دستهٔ فعلی را push کن
+            if [ $((batch_size_mb + file_size_mb)) -gt $MAX_BATCH_SIZE_MB ] && [ ${#batch[@]} -gt 0 ]; then
+              echo "📦 ارسال دسته با حجم تقریبی ${batch_size_mb}MB (${#batch[@]} فایل)"
+              git add "${batch[@]}"
+              git commit -m "Add files batch [skip ci]" || echo "Nothing to commit?"
+              for attempt in 1 2 3; do
+                if git push origin ${{ github.ref_name }} 2>&1; then
+                  echo "   ✅ دسته با موفقیت push شد"
+                  break
+                else
+                  if [ $attempt -lt 3 ]; then
+                    echo "   ⚠️ تلاش $attempt/3 ناموفق، ۱۰ ثانیه صبر می‌کنیم..."
+                    sleep 10
+                  else
+                    echo "   ❌ push پس از ۳ تلاش ناموفق ماند"
+                    exit 1
+                  fi
+                fi
+              done
+              # بازنشانی دسته
+              batch=()
+              batch_size_mb=0
             fi
+            # اضافه کردن فایل به دسته
+            batch+=("$file")
+            batch_size_mb=$((batch_size_mb + file_size_mb))
           done
+
+          # ارسال آخرین دسته (اگر چیزی باقی مانده باشد)
+          if [ ${#batch[@]} -gt 0 ]; then
+            echo "📦 ارسال آخرین دسته با حجم تقریبی ${batch_size_mb}MB (${#batch[@]} فایل)"
+            git add "${batch[@]}"
+            git commit -m "Add final files batch [skip ci]" || echo "Nothing to commit?"
+            for attempt in 1 2 3; do
+              if git push origin ${{ github.ref_name }} 2>&1; then
+                echo "   ✅ آخرین دسته push شد"
+                break
+              else
+                if [ $attempt -lt 3 ]; then
+                  echo "   ⚠️ تلاش $attempt/3 ناموفق، ۱۰ ثانیه صبر می‌کنیم..."
+                  sleep 10
+                else
+                  echo "   ❌ push آخرین دسته شکست خورد"
+                  exit 1
+                fi
+              fi
+            done
+          fi
+
+          echo "🎉 تمام فایل‌ها با موفقیت ارسال شدند."
           
